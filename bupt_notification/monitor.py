@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import Config
-from .dekt import ApiError, AuthError, DektClient
+from .dekt import ApiError, AuthError, DektClient, token_holder, token_seconds_left
 from .state import State
 from .telegram import TelegramError, format_notice, format_start, format_summary, send_message
 from .web_login import LoginError, browser_login
@@ -48,19 +48,37 @@ class Monitor:
             user_agent=cfg.user_agent,
         )
 
-    # ---------- 认证 ----------
+    # ---------- 认证与续期 ----------
     def ensure_auth(self, force: bool = False) -> None:
-        if force or not self.client.token:
+        """保证 client.token 可用。
+
+        - 没有 token  → 浏览器登录
+        - token 是 JWT 且剩余不足 refresh_margin_hours → 提前续期（不等 401）
+        - 其余情况 → 直接用；真正失效时由 _fetch_items 的 401 兜底重登
+        """
+        token = self.client.token
+        if force or not token:
+            reason = "强制刷新" if force else "本地无 token"
+            log.info("需要登录（%s）", reason)
             self._relogin()
             return
-        try:
-            self.client.notification_total()
-            return
-        except AuthError as exc:
-            log.warning("token 失效（%s），重新登录…", exc)
+
+        left = token_seconds_left(token)
+        if left is None:
+            return  # 不是标准 JWT，无法预判，交给 401 兜底
+        if left <= 0:
+            log.info("token 已过期（账号 %s），重新登录", token_holder(token))
+            self._relogin()
+        elif left < self.cfg.refresh_margin_hours * 3600:
+            log.info("token 剩余 %.1f 小时（账号 %s），提前续期", left / 3600, token_holder(token))
             self._relogin()
 
     def _relogin(self) -> None:
+        if not (self.cfg.username and self.cfg.password):
+            raise AuthError(
+                "没有可用 token，且未配置 BUPT_USERNAME / BUPT_PASSWORD，无法登录。"
+                "请在 .env 里填好账号密码后重启。"
+            )
         try:
             token = browser_login(
                 self.cfg.api_base,
@@ -75,6 +93,22 @@ class Monitor:
         self.state.set_token(token)
         self.state.save()
         self.client.token = token
+        left = token_seconds_left(token)
+        log.info(
+            "登录成功：账号 %s，token 有效期 %s",
+            token_holder(token),
+            f"{left / 3600:.1f} 小时" if left else "未知",
+        )
+
+    def _fetch_items(self) -> list[dict]:
+        """拉取通知；token 中途失效则重登一次再试。"""
+        self.ensure_auth()
+        try:
+            return self.client.search_notifications(size=self.cfg.page_size)
+        except AuthError as exc:
+            log.warning("token 被服务端拒绝（%s），重新登录后重试", exc)
+            self._relogin()
+            return self.client.search_notifications(size=self.cfg.page_size)
 
     # ---------- 推送 ----------
     def _send(self, text: str) -> None:
@@ -121,8 +155,7 @@ class Monitor:
         started = time.time()
         result = {"fetched": 0, "new": 0, "pushed": 0, "baseline": False, "pending": 0, "error": ""}
         try:
-            self.ensure_auth()
-            items = self.client.search_notifications(size=self.cfg.page_size)
+            items = self._fetch_items()
         except (AuthError, ApiError) as exc:
             result["error"] = str(exc)
             self.state.bump("errors")
@@ -170,9 +203,33 @@ class Monitor:
         )
         return result
 
+    def _startup_checks(self) -> None:
+        """启动自检：把「配置缺了什么」一次说清楚，别等到 401 才发现。"""
+        if not (self.cfg.username and self.cfg.password):
+            if self.client.token:
+                log.warning(
+                    "未配置 BUPT_USERNAME / BUPT_PASSWORD：当前 token 还能用，"
+                    "但一旦过期（约 3 天）就无法自动续期，请在 .env 里补齐后重启"
+                )
+            else:
+                log.error(
+                    "既没有可用 token，也没有 BUPT_USERNAME / BUPT_PASSWORD —— "
+                    "无法登录，监控会一直拿不到数据。请在 .env 里配置账号密码。"
+                )
+        if not self.cfg.push_ready:
+            log.warning(
+                "未配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID："
+                "通知会进入待发队列（最多 %d 条）不会丢，配好后自动补推",
+                self.cfg.max_pending,
+            )
+        left = token_seconds_left(self.client.token)
+        if left is not None:
+            log.info("当前 token 剩余有效期：%.1f 小时", left / 3600)
+
     # ---------- 常驻 ----------
     def run_forever(self) -> None:
         interval = max(1, self.cfg.interval_minutes) * 60
+        self._startup_checks()
         log.info("监控启动：每 %d 分钟检查一次", self.cfg.interval_minutes)
         while True:
             try:

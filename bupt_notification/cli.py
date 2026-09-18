@@ -19,7 +19,7 @@ import time
 
 from . import __version__
 from .config import PROJECT_ROOT, Config, load_config
-from .dekt import ApiError, AuthError, DektClient
+from .dekt import ApiError, AuthError, DektClient, token_seconds_left
 from .monitor import Monitor, fetch_latest, single_instance
 from .state import State
 from .telegram import TelegramError, detect_chat_id, format_notice, get_me, send_message
@@ -130,19 +130,27 @@ def cmd_test_notify(cfg: Config, args: argparse.Namespace) -> int:
 def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     st = State(cfg.state_file)
     d = st.data
-    age = ""
-    if d.get("token_updated_at"):
-        age = f"{int(time.time() - d['token_updated_at']) // 3600} 小时前"
+    token = st.token or cfg.token
+    left = token_seconds_left(token) if token else None
+    if not token:
+        token_desc = "无"
+    elif left is None:
+        token_desc = "有（非 JWT，无法预判有效期）"
+    elif left <= 0:
+        token_desc = f"已过期 {abs(left) // 3600} 小时（下轮会自动重登）"
+    else:
+        token_desc = f"有效，剩余 {left / 3600:.1f} 小时"
     print(f"版本        : {__version__}")
     print(f"状态文件    : {cfg.state_file}")
     print(f"基线已建立  : {'是' if st.baseline_done else '否'}")
     print(f"已记录通知  : {len(d.get('seen', []))} 条")
     print(f"待发队列    : {len(st.pending)} 条")
-    print(f"token       : {'有' if st.token else '无'}（更新于 {age or '未知'}）")
+    print(f"token       : {token_desc}")
+    print(f"账号配置    : {'已配置（可自动续期）' if (cfg.username and cfg.password) else '未配置 .env 账号密码'}")
     print(f"上次检查    : {d.get('last_check_iso') or '还没跑过'}")
     print(f"统计        : {d.get('stats')}")
     print(f"Telegram    : {'已配置' if cfg.push_ready else '未配置（缺 token/chat_id，通知会排队不丢）'}")
-    print(f"检查频率    : 每 {cfg.interval_minutes} 分钟")
+    print(f"检查频率    : 每 {cfg.interval_minutes} 分钟（剩余不足 {cfg.refresh_margin_hours} 小时自动续期 token）")
     return 0
 
 

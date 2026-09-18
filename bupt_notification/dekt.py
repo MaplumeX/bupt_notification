@@ -13,8 +13,10 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +31,44 @@ class AuthError(RuntimeError):
 
 class ApiError(RuntimeError):
     """其它接口错误（网络、5xx、返回体异常）。"""
+
+
+# ---------- token（JWT）解析：用于提前续期 ----------
+
+def jwt_payload(token: str) -> dict:
+    """不校验签名地取出 JWT payload；不是 JWT 就返回 {}。"""
+    try:
+        parts = (token or "").split(".")
+        if len(parts) < 2:
+            return {}
+        pad = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = base64.urlsafe_b64decode(pad)
+        payload = json.loads(data)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def token_expires_at(token: str) -> int | None:
+    exp = jwt_payload(token).get("exp")
+    try:
+        return int(exp) if exp else None
+    except (TypeError, ValueError):
+        return None
+
+
+def token_seconds_left(token: str) -> int | None:
+    """剩余有效期（秒）；无法解析返回 None。"""
+    exp = token_expires_at(token)
+    if exp is None:
+        return None
+    return exp - int(time.time())
+
+
+def token_holder(token: str) -> str:
+    """从 token 里取学号，仅用于日志（永远不要打印 token 本身）。"""
+    sub = jwt_payload(token).get("sub")
+    return str(sub) if sub else "?"
 
 
 def _iso_to_local(iso: str) -> str:

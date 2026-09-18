@@ -66,6 +66,7 @@ class Config:
 
     # 轮询
     interval_minutes: int = 30
+    refresh_margin_hours: int = 6  # token 剩余不足该值时提前续期（token 寿命 3 天）
     page_size: int = 50             # 每次拉取的最新通知条数
     include_content: bool = False   # 推送时是否附正文全文
     notify_on_start: bool = True    # 首次成功推送时告知"监控已启用"
@@ -99,6 +100,7 @@ def load_config(env_file: Path | None = None) -> Config:
         bot_token=_get(env, "TELEGRAM_BOT_TOKEN"),
         chat_id=_get(env, "TELEGRAM_CHAT_ID"),
         interval_minutes=_get_int(env, "POLL_INTERVAL_MINUTES", 30),
+        refresh_margin_hours=_get_int(env, "TOKEN_REFRESH_MARGIN_HOURS", 6),
         page_size=_get_int(env, "PAGE_SIZE", 50),
         include_content=_get_bool(env, "INCLUDE_CONTENT", False),
         notify_on_start=_get_bool(env, "NOTIFY_ON_START", True),

@@ -66,8 +66,8 @@ bupt_notification/
 ```bash
 cd /root/bupt_notification
 
-# 1) 填 .env：账号密码（已填）、Telegram bot token 与 chat_id
-vi .env
+# 1) 从模板生成本机配置并填写（账号密码、bot token、chat_id）
+cp .env.example .env && vi .env
 
 # 2) 构建并启动
 docker compose up -d --build
@@ -80,19 +80,28 @@ docker compose logs -f
 
 ## 配置（.env）
 
-```ini
-BUPT_USERNAME=2024211295      # 学工号
-BUPT_PASSWORD=******          # 密码
+**没有任何凭据写在代码里。** 一切通过 `.env`（本机）/ 环境变量注入：
 
-TELEGRAM_BOT_TOKEN=           # @BotFather 创建机器人后拿到的 token
-TELEGRAM_CHAT_ID=             # 你的 chat id
-
-POLL_INTERVAL_MINUTES=30      # 检查频率
-INCLUDE_CONTENT=false         # true = 推送时附上正文全文
-MAX_PENDING=100               # 待发队列上限
+```bash
+cp .env.example .env    # 模板在 .env.example，只有占位符
+vi .env                 # 填你自己的账号、bot token、chat_id
 ```
 
-改完 `.env` 后：`docker compose restart`（`environment:` 里的 STATE_FILE 等由 compose 注入）。
+```ini
+BUPT_USERNAME=你的学工号           # 用于登录 / token 到期自动续期
+BUPT_PASSWORD=你的密码
+TELEGRAM_BOT_TOKEN=你的bot token
+TELEGRAM_CHAT_ID=你的chat id
+
+POLL_INTERVAL_MINUTES=30          # 检查频率
+TOKEN_REFRESH_MARGIN_HOURS=6      # token 剩余不足 N 小时就提前续期
+INCLUDE_CONTENT=false             # true = 推送时附正文全文
+MAX_PENDING=100                   # 待发队列上限
+```
+
+- `.env` 在 `.gitignore` 和 `.dockerignore` 里，**既不会进 git，也不会进镜像层**
+- 运行期 token 存在 `./data/state.json`（600 权限，同样不入库），日志只打印账号和剩余有效期，**从不打印 token**
+- 改完 `.env`：`docker compose restart`
 
 ### 创建机器人并拿到 chat_id
 
@@ -147,6 +156,22 @@ docker compose run --rm bupt-notification python -m bupt_notification list -n 10
 - **改代码后**：`docker compose up -d --build`。
 - **镜像体积**：playwright 官方镜像自带 Chromium + 系统依赖（约 2GB），换来的是
   换 token 时的浏览器登录开箱可用，不用自己装 Chrome 和一堆 .so。
+
+## 认证与 token 续期
+
+登录/续期**全部自动**，不需要手工贴 token：
+
+| 时机 | 行为 |
+|---|---|
+| 启动时没有 token | 用 `.env` 的账号密码跑一次容器内无头 Chromium 登录，token 存进 `data/state.json` |
+| 启动自检 | 打印当前 token 剩余有效期；缺账号密码/缺 bot 配置会明确告警（不会静默失败） |
+| 每轮轮询前 | 解析 JWT 的 `exp`，**剩余不足 `TOKEN_REFRESH_MARGIN_HOURS`（默认 6 小时）就提前续期** |
+| 接口返回 401/403 | 立即重登一次再重试本轮请求（兜底，防止 token 被服务端提前作废） |
+| 未配置账号密码时 | 有 token 仍可运行，但会告警"到期后无法自动续期"；没有 token 则明确报错 |
+
+> 实测：该 token 是 JWT，`exp - iat = 259200s`，**寿命正好 3 天**，所以提前续期是必需的，
+> 否则每 3 天就会出现一段抓不到数据的时间窗。
+> 想手动立刻换：`make login`（会重新登录并把新 token 写进 `data/state.json`）。
 
 ## 行为说明（重要）
 
