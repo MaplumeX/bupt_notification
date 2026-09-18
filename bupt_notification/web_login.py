@@ -129,6 +129,7 @@ def browser_login(
                 try:
                     state_path.parent.mkdir(parents=True, exist_ok=True)
                     ctx.storage_state(path=str(state_path))
+                    os.chmod(state_path, 0o600)  # 会话含 cookie，收紧权限
                 except Exception as exc:
                     log.warning("保存浏览器会话失败（不影响使用）：%s", exc)
 
