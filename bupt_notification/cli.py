@@ -163,6 +163,22 @@ def cmd_preview_format(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_healthcheck(cfg: Config, args: argparse.Namespace) -> int:
+    """给 docker healthcheck 用：检查上一轮是否按期执行。"""
+    st = State(cfg.state_file)
+    last = int(st.data.get("last_check_at") or 0)
+    if last == 0:
+        print("尚未执行第一轮（启动中）")
+        return 0
+    age = time.time() - last
+    limit = max(cfg.interval_minutes * 2, 15) * 60
+    if age > limit:
+        print(f"不健康：上次检查在 {int(age // 60)} 分钟前（阈值 {int(limit // 60)} 分钟）")
+        return 1
+    print(f"健康：上次检查在 {int(age // 60)} 分钟前")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bupt_notification", description="北邮第二课堂校内通知监控 → Telegram")
     p.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
@@ -185,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("test-notify", help="发一条测试消息")
     sub.add_parser("status", help="查看当前状态")
     sub.add_parser("reset", help="重置状态（重新建立基线）")
+    sub.add_parser("healthcheck", help="docker healthcheck：检查轮询是否按期执行")
 
     sp = sub.add_parser("preview", help="打印推送排版预览（不发送）")
     sp.add_argument("-n", "--limit", type=int, default=3)
@@ -201,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run, "once": cmd_once, "list": cmd_list, "login": cmd_login,
         "detect-chat-id": cmd_detect_chat_id, "test-notify": cmd_test_notify,
         "status": cmd_status, "reset": cmd_reset, "preview": cmd_preview_format,
+        "healthcheck": cmd_healthcheck,
     }
     handler = handlers[cmd]
     try:

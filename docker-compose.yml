@@ -1,0 +1,29 @@
+services:
+  bupt-notification:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bupt-notification:latest
+    container_name: bupt-notification
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 状态文件放在挂载卷里，容器重建不丢基线/token/待发队列
+      STATE_FILE: /app/data/state.json
+      TZ: Asia/Shanghai
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      # 超过 2 个轮询周期没检查就标记不健康（healthcheck 命令用 exit code 表达）
+      test: ["CMD", "python", "-m", "bupt_notification", "healthcheck"]
+      interval: 5m
+      timeout: 30s
+      retries: 3
+      start_period: 3m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

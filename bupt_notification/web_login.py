@@ -23,8 +23,12 @@ class LoginError(RuntimeError):
     pass
 
 
-def find_chrome(explicit: str = "") -> str:
-    """定位本地 Chromium/Chrome 可执行文件。"""
+def find_chrome(explicit: str = "") -> str | None:
+    """定位本地 Chromium/Chrome 可执行文件；找不到返回 None（用 playwright 自带浏览器）。"""
+    import glob
+    import os
+    from pathlib import Path
+
     candidates: list[str] = []
     if explicit:
         candidates.append(explicit)
@@ -33,17 +37,20 @@ def find_chrome(explicit: str = "") -> str:
     home = Path.home()
     candidates += sorted(glob.glob(str(home / ".agent-browser/browsers/*/chrome")), reverse=True)
     candidates += sorted(glob.glob(str(home / ".cache/ms-playwright/chromium-*/chrome-linux64/chrome")), reverse=True)
+    candidates += sorted(glob.glob(str(home / ".cache/ms-playwright/chromium-*/chrome-linux/chrome")), reverse=True)
     candidates += sorted(glob.glob(str(home / ".cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell")), reverse=True)
+    # docker 官方 playwright 镜像：PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    for root in (os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""), "/ms-playwright"):
+        if root:
+            candidates += sorted(glob.glob(os.path.join(root, "chromium-*/chrome-linux/chrome")), reverse=True)
+            candidates += sorted(glob.glob(os.path.join(root, "chromium-*/chrome-linux64/chrome")), reverse=True)
     for name in ("google-chrome", "chromium", "chromium-browser", "chrome"):
         if (found := shutil.which(name)):
             candidates.append(found)
     for c in candidates:
         if c and os.path.isfile(c) and os.access(c, os.X_OK):
             return c
-    raise LoginError(
-        "找不到可用的 Chrome/Chromium。请设置 CHROME_PATH，或执行：\n"
-        "  npm install -g agent-browser && agent-browser install"
-    )
+    return None
 
 
 def browser_login(
@@ -70,14 +77,16 @@ def browser_login(
 
     exe = find_chrome(chrome_path)
     state_path = Path(browser_state_file) if browser_state_file else None
-    log.info("浏览器登录中（%s）…", exe)
+    log.info("浏览器登录中（%s）…", exe or "playwright 自带 Chromium")
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            executable_path=exe,
-            headless=headless,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
-        )
+        launch_kwargs: dict = {
+            "headless": headless,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+        }
+        if exe:
+            launch_kwargs["executable_path"] = exe
+        browser = pw.chromium.launch(**launch_kwargs)
         try:
             ctx_kwargs: dict = {"viewport": {"width": 1366, "height": 900}, "locale": "zh-CN"}
             if user_agent:

@@ -1,0 +1,12 @@
+# 构建上下文排除：这些内容不该进镜像（尤其 .env 里是账号密码）
+.env
+.venv/
+data/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+docker-compose.yml
+Dockerfile
+Makefile
+README.md
