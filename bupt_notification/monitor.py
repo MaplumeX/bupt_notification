@@ -1,0 +1,198 @@
+"""监控主循环：抓通知 → 去重 → 入队 → 推送 → 记录状态。"""
+
+from __future__ import annotations
+
+import fcntl
+import logging
+import random
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+from .config import Config
+from .dekt import ApiError, AuthError, DektClient
+from .state import State
+from .telegram import TelegramError, format_notice, format_start, format_summary, send_message
+from .web_login import LoginError, browser_login
+
+log = logging.getLogger("bupt.monitor")
+
+
+@contextmanager
+def single_instance(lock_file: Path):
+    """用 flock 防止定时任务与手动执行撞车。"""
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_file, "w")
+    try:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("已有另一个监控实例在运行（lock 被占用）")
+        yield
+    finally:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+class Monitor:
+    def __init__(self, cfg: Config, state: State | None = None, *, dry_run: bool = False):
+        self.cfg = cfg
+        self.state = state or State(cfg.state_file)
+        self.dry_run = dry_run
+        self.client = DektClient(
+            cfg.api_base,
+            self.state.token or cfg.token,
+            timeout=cfg.timeout_seconds,
+            user_agent=cfg.user_agent,
+        )
+
+    # ---------- 认证 ----------
+    def ensure_auth(self, force: bool = False) -> None:
+        if force or not self.client.token:
+            self._relogin()
+            return
+        try:
+            self.client.notification_total()
+            return
+        except AuthError as exc:
+            log.warning("token 失效（%s），重新登录…", exc)
+            self._relogin()
+
+    def _relogin(self) -> None:
+        try:
+            token = browser_login(
+                self.cfg.api_base,
+                self.cfg.username,
+                self.cfg.password,
+                chrome_path=self.cfg.chrome_path,
+                browser_state_file=self.cfg.browser_state_file,
+                user_agent=self.cfg.user_agent,
+            )
+        except LoginError as exc:
+            raise AuthError(f"重新登录失败：{exc}") from exc
+        self.state.set_token(token)
+        self.state.save()
+        self.client.token = token
+
+    # ---------- 推送 ----------
+    def _send(self, text: str) -> None:
+        if self.dry_run:
+            log.info("[dry-run] 本应推送：\n%s", text)
+            return
+        send_message(self.cfg.bot_token, self.cfg.chat_id, text, timeout=self.cfg.timeout_seconds)
+
+    def flush_pending(self) -> int:
+        """把待发队列发出去。返回成功推送条数。失败则保留队列，下轮重试。"""
+        pend = list(self.state.pending)
+        if not pend:
+            return 0
+        if not self.cfg.push_ready and not self.dry_run:
+            log.info("Telegram 未配置（缺 TELEGRAM_BOT_TOKEN/CHAT_ID），%d 条通知留在待发队列", len(pend))
+            return 0
+
+        sent = 0
+        # 补推前先说明一下，避免突然收到一串消息以为出 bug
+        if len(pend) > 1:
+            try:
+                self._send(format_summary(len(pend)))
+            except (TelegramError, Exception) as exc:  # noqa: BLE001
+                log.warning("补推提示发送失败：%s", exc)
+
+        for item in pend:
+            text = format_notice(item, include_content=self.cfg.include_content)
+            try:
+                self._send(text)
+            except TelegramError as exc:
+                log.error("推送失败，保留在队列稍后重试：%s", exc)
+                self.state.bump("errors")
+                self.state.save()
+                return sent
+            self.state.drop_pending(item["id"])
+            self.state.mark_pushed([item["id"]])
+            self.state.bump("pushed")
+            self.state.save()
+            sent += 1
+        return sent
+
+    # ---------- 单轮 ----------
+    def run_once(self, *, force_baseline: bool = False) -> dict:
+        started = time.time()
+        result = {"fetched": 0, "new": 0, "pushed": 0, "baseline": False, "pending": 0, "error": ""}
+        try:
+            self.ensure_auth()
+            items = self.client.search_notifications(size=self.cfg.page_size)
+        except (AuthError, ApiError) as exc:
+            result["error"] = str(exc)
+            self.state.bump("errors")
+            self.state.save()
+            log.error("拉取通知失败：%s", exc)
+            return result
+
+        result["fetched"] = len(items)
+        self.state.touch_check()
+
+        # 首次运行（或强制）：只记录基线，不推送
+        if force_baseline or not self.state.baseline_done:
+            self.state.mark_pushed([it["id"] for it in items])
+            self.state.data["baseline_done"] = True
+            result["baseline"] = True
+            log.info("建立基线：记录 %d 条现有通知，不推送", len(items))
+            if self.cfg.push_ready or self.dry_run:
+                if self.cfg.notify_on_start and not self.state.data.get("started_notified"):
+                    try:
+                        self._send(format_start(len(items), self.cfg.interval_minutes))
+                        self.state.data["started_notified"] = True
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("启动提示发送失败：%s", exc)
+            self.state.save()
+            return result
+
+        # 找新增：既没推过，也不在待发队列里
+        seen = self.state.seen_ids()
+        queued = self.state.pending_ids()
+        fresh = [it for it in items if it["id"] not in seen and it["id"] not in queued]
+        # 接口按时间倒序，推送时按时间正序（先发生的先推）
+        fresh.sort(key=lambda x: (x.get("time") or "", x["id"]))
+        if fresh:
+            log.info("发现 %d 条新通知：%s", len(fresh), " / ".join(i["title"][:30] for i in fresh))
+            self.state.queue(fresh, self.cfg.max_pending)
+        result["new"] = len(fresh)
+        self.state.save()
+
+        result["pushed"] = self.flush_pending()
+        result["pending"] = len(self.state.pending)
+        self.state.save()
+        log.info(
+            "本轮完成：抓取 %d 条 / 新增 %d 条 / 推送 %d 条 / 队列剩余 %d 条，用时 %.1fs",
+            result["fetched"], result["new"], result["pushed"], result["pending"], time.time() - started,
+        )
+        return result
+
+    # ---------- 常驻 ----------
+    def run_forever(self) -> None:
+        interval = max(1, self.cfg.interval_minutes) * 60
+        log.info("监控启动：每 %d 分钟检查一次", self.cfg.interval_minutes)
+        while True:
+            try:
+                with single_instance(self.cfg.lock_file):
+                    self.run_once()
+            except RuntimeError as exc:
+                log.warning("跳过本轮：%s", exc)
+            except AuthError as exc:
+                log.error("认证失败，下轮再试：%s", exc)
+            except Exception:  # noqa: BLE001
+                log.exception("本轮异常，%d 秒后重试", 60)
+                self.state.bump("errors")
+                self.state.save()
+                time.sleep(60 + random.uniform(0, 10))
+                continue
+            # 加一点抖动，避免整点扎堆
+            time.sleep(interval + random.uniform(0, 30))
+
+
+def fetch_latest(cfg: Config, limit: int = 10, *, token: str = "") -> list[dict]:
+    """只读拉取（不碰状态文件），用于 --list。"""
+    client = DektClient(cfg.api_base, token or cfg.token, timeout=cfg.timeout_seconds, user_agent=cfg.user_agent)
+    return client.search_notifications(size=limit)

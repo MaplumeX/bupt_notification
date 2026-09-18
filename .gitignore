@@ -1,0 +1,6 @@
+# 密钥与运行期数据
+.env
+data/
+.venv/
+__pycache__/
+*.pyc
