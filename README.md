@@ -50,7 +50,8 @@ bupt_notification/
 │   ├── dekt.py                 # 第二课堂 API 客户端
 │   ├── web_login.py            # 浏览器登录（仅换 token，playwright）
 │   ├── state.py                # 基线 / 已推送 / 待发队列（原子写 JSON）
-│   ├── telegram.py             # Bot API 推送 + 消息排版
+│   ├── telegram.py             # Bot API 推送 + 命令轮询 + 消息排版
+│   ├── bot.py                 # Telegram 命令处理（/status /pause /pull /latest…）
 │   ├── monitor.py              # 轮询主循环
 │   └── cli.py                  # 命令行
 ├── Dockerfile                  # 基于 mcr.microsoft.com/playwright/python（自带 Chromium）
@@ -118,6 +119,19 @@ make detect-chat-id          # 或 docker compose exec -T bupt-notification \
 ```bash
 make test-notify && docker compose restart
 ```
+
+## 机器人命令（Telegram 里直接发）
+
+监控常驻运行时，在等待下一轮检查的间隙会长轮询 Telegram 命令（只响应 `.env` 里配置的那个 chat_id）：
+
+| 命令 | 说明 |
+| --- | --- |
+| `/status` | 查看监控状态（暂停/运行、token 有效期、队列、统计等） |
+| `/pause` | 暂停推送：通知照常抓取并进入待发队列，不会丢 |
+| `/resume` | 恢复推送，并立即补发队列里的通知 |
+| `/pull` | 不等下一个周期，立即拉取检查一轮（可代替等定时） |
+| `/latest` | 列出最新 10 条通知（可带参数 `/latest 20`，上限 30 条） |
+| `/help` | 查看全部命令 |
 
 ## 常用命令（Makefile）
 

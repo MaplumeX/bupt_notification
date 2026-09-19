@@ -122,6 +122,9 @@ class Monitor:
         pend = list(self.state.pending)
         if not pend:
             return 0
+        if self.state.paused:
+            log.info("已暂停推送：%d 条通知留在待发队列，/resume 后补发", len(pend))
+            return 0
         if not self.cfg.push_ready and not self.dry_run:
             log.info("Telegram 未配置（缺 TELEGRAM_BOT_TOKEN/CHAT_ID），%d 条通知留在待发队列", len(pend))
             return 0
@@ -226,27 +229,49 @@ class Monitor:
         if left is not None:
             log.info("当前 token 剩余有效期：%.1f 小时", left / 3600)
 
+    def run_once_locked(self, *, force_baseline: bool = False) -> dict:
+        """带单实例锁跑一轮。供主循环和 Telegram /pull 命令共用。"""
+        with single_instance(self.cfg.lock_file):
+            return self.run_once(force_baseline=force_baseline)
+
     # ---------- 常驻 ----------
     def run_forever(self) -> None:
         interval = max(1, self.cfg.interval_minutes) * 60
         self._startup_checks()
         log.info("监控启动：每 %d 分钟检查一次", self.cfg.interval_minutes)
+        bot = None
+        if self.cfg.bot_token and not self.dry_run:
+            from .bot import CommandBot
+            bot = CommandBot(self.cfg, self.state, self)
+            bot.register_commands()
+            log.info("Telegram 命令已启用：/status /pause /resume /pull /latest /help")
+        elif self.dry_run:
+            log.info("dry-run 模式：不启用 Telegram 命令轮询")
+        next_run = time.time()
         while True:
             try:
-                with single_instance(self.cfg.lock_file):
-                    self.run_once()
+                now = time.time()
+                if now >= next_run:
+                    with single_instance(self.cfg.lock_file):
+                        self.run_once()
+                    next_run = time.time() + interval + random.uniform(0, 30)
+                elif bot:
+                    # 空闲时段长轮询命令；轮询时长不超过距下轮的剩余时间
+                    bot.poll_and_handle(timeout=min(25, max(1, next_run - now)))
+                else:
+                    time.sleep(min(60, max(1, next_run - time.time())))
             except RuntimeError as exc:
                 log.warning("跳过本轮：%s", exc)
+                next_run = time.time() + 60
             except AuthError as exc:
                 log.error("认证失败，下轮再试：%s", exc)
+                next_run = time.time() + interval
             except Exception:  # noqa: BLE001
-                log.exception("本轮异常，%d 秒后重试", 60)
+                log.exception("本轮异常，60 秒后重试")
                 self.state.bump("errors")
                 self.state.save()
                 time.sleep(60 + random.uniform(0, 10))
-                continue
-            # 加一点抖动，避免整点扎堆
-            time.sleep(interval + random.uniform(0, 30))
+                next_run = time.time() + interval
 
 
 def fetch_latest(cfg: Config, limit: int = 10, *, token: str = "") -> list[dict]:

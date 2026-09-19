@@ -22,8 +22,14 @@ def _call(bot_token: str, method: str, params: dict, timeout: int = 20) -> dict:
     if not bot_token:
         raise TelegramError("没有配置 TELEGRAM_BOT_TOKEN")
     url = f"{API}/bot{bot_token}/{method}"
-    data = urllib.parse.urlencode(params).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    if any(isinstance(v, (dict, list)) for v in params.values()):
+        # 嵌套结构（如 setMyCommands 的 commands）必须用 JSON body
+        data = json.dumps(params).encode()
+        ctype = "application/json"
+    else:
+        data = urllib.parse.urlencode(params).encode()
+        ctype = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": ctype})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8", "replace"))
@@ -52,6 +58,22 @@ def send_message(bot_token: str, chat_id: str, text: str, *, disable_preview: bo
 
 def get_me(bot_token: str) -> dict:
     return _call(bot_token, "getMe", {})
+
+def set_my_commands(bot_token: str, commands: list[tuple[str, str]]) -> dict:
+    """注册命令菜单（BotFather 式的 / 提示列表）。"""
+    return _call(bot_token, "setMyCommands", {
+        "commands": [{"command": c, "description": d} for c, d in commands],
+    })
+
+def get_updates(bot_token: str, *, offset: int | None = None, poll_timeout: int = 0, timeout: int = 20) -> list:
+    """拉取待处理 updates。poll_timeout > 0 时为长轮询（服务端挂起最多 N 秒）。
+
+    调用方应传 offset = 已处理的最大 update_id + 1，向服务端确认旧消息已消费。
+    """
+    params = {"limit": 100, "timeout": poll_timeout}
+    if offset is not None:
+        params["offset"] = offset
+    return _call(bot_token, "getUpdates", params, timeout=timeout)
 
 
 def detect_chat_id(bot_token: str) -> str:

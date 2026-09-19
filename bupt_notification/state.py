@@ -78,6 +78,11 @@ class State:
     def token(self) -> str:
         return self.data.get("token") or ""
 
+    @property
+    def paused(self) -> bool:
+        """是否处于暂停推送状态（由 Telegram /pause、/resume 控制）。"""
+        return bool(self.data.get("paused"))
+
     def set_token(self, token: str) -> None:
         self.data["token"] = token
         self.data["token_updated_at"] = int(time.time())
