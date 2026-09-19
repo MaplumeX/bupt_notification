@@ -15,7 +15,10 @@ API = "https://api.telegram.org"
 
 
 class TelegramError(RuntimeError):
-    pass
+    def __init__(self, msg: str, *, code: int = 0):
+        super().__init__(msg)
+        self.code = code
+        self.blocked = code == 403 or "blocked" in msg.lower() or "kicked" in msg.lower()
 
 
 def _call(bot_token: str, method: str, params: dict, timeout: int = 20) -> dict:
@@ -38,7 +41,7 @@ def _call(bot_token: str, method: str, params: dict, timeout: int = 20) -> dict:
         try:
             payload = json.loads(raw)
         except Exception:
-            raise TelegramError(f"HTTP {exc.code}: {raw[:200]}") from exc
+            raise TelegramError(f"HTTP {exc.code}: {raw[:200]}", code=exc.code) from exc
     except urllib.error.URLError as exc:
         raise TelegramError(f"网络错误: {exc.reason}") from exc
 

@@ -109,21 +109,30 @@ def cmd_detect_chat_id(cfg: Config, args: argparse.Namespace) -> int:
         print("没找到 chat_id。请先在 Telegram 里给这个机器人发一条消息（如 /start），再重新运行。")
         return 1
     print(f"检测到 chat_id：{chat_id}")
-    print(f"把它写进 .env：TELEGRAM_CHAT_ID={chat_id}")
+    print(f"把它写进 .env 的 TELEGRAM_CHAT_ID（作为管理员，可使用 /pause /resume /pull /subscribers）：TELEGRAM_CHAT_ID={chat_id}")
+    print("普通订阅者无需任何配置，给机器人发 /start 即可。")
     return 0
 
 
 def cmd_test_notify(cfg: Config, args: argparse.Namespace) -> int:
-    if not cfg.push_ready:
-        print("Telegram 未配置：需要 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID")
+    if not cfg.bot_token:
+        print("Telegram 未配置：需要 TELEGRAM_BOT_TOKEN")
         return 1
+    chat_id = cfg.chat_id
+    if not chat_id:
+        st = State(cfg.state_file)
+        subs = st.subscriber_ids()
+        if not subs:
+            print("没有可用的目标：既未配置 TELEGRAM_CHAT_ID，也没有任何订阅者（先在 Telegram 里发 /start）")
+            return 1
+        chat_id = subs[0]
     try:
-        send_message(cfg.bot_token, cfg.chat_id,
+        send_message(cfg.bot_token, chat_id,
                      "🧪 <b>测试消息</b>\nbupt_notification 推送链路正常。", timeout=cfg.timeout_seconds)
     except TelegramError as exc:
         print(f"发送失败：{exc}")
         return 1
-    print("测试消息已发送，请查看 Telegram。")
+    print(f"测试消息已发送给 {chat_id}，请查看 Telegram。")
     return 0
 
 
@@ -149,7 +158,8 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     print(f"账号配置    : {'已配置（可自动续期）' if (cfg.username and cfg.password) else '未配置 .env 账号密码'}")
     print(f"上次检查    : {d.get('last_check_iso') or '还没跑过'}")
     print(f"统计        : {d.get('stats')}")
-    print(f"Telegram    : {'已配置' if cfg.push_ready else '未配置（缺 token/chat_id，通知会排队不丢）'}")
+    print(f"订阅者      : {len(st.subscriber_ids())} 人")
+    print(f"Telegram    : {'已配置' if cfg.bot_token else '未配置（缺 token，通知会排队不丢）'}")
     print(f"检查频率    : 每 {cfg.interval_minutes} 分钟（剩余不足 {cfg.refresh_margin_hours} 小时自动续期 token）")
     return 0
 

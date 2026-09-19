@@ -27,6 +27,7 @@ class State:
             "last_check_at": 0,
             "last_check_iso": "",
             "started_notified": False,
+            "subscribers": [],   # 订阅者 chat_id 列表（/start 加入，/stop 移除）
             "stats": {"runs": 0, "pushed": 0, "errors": 0},
         }
         self._load()
@@ -87,6 +88,33 @@ class State:
         self.data["token"] = token
         self.data["token_updated_at"] = int(time.time())
 
+    # ---------- 订阅者 ----------
+    @property
+    def subscribers(self) -> list[str]:
+        return self.data.setdefault("subscribers", [])
+
+    def subscriber_ids(self) -> list[str]:
+        """去重后的订阅者 chat_id 列表。"""
+        return list(dict.fromkeys(str(c) for c in self.subscribers if c))
+
+    def add_subscriber(self, chat_id: str) -> bool:
+        """加入订阅。返回是否发生了变化。"""
+        subs = self.subscribers
+        chat_id = str(chat_id)
+        if chat_id in subs:
+            return False
+        subs.append(chat_id)
+        return True
+
+    def remove_subscriber(self, chat_id: str) -> bool:
+        """移除订阅。返回是否发生了变化。"""
+        chat_id = str(chat_id)
+        subs = self.subscribers
+        if chat_id not in subs:
+            return False
+        self.data["subscribers"] = [c for c in subs if c != chat_id]
+        return True
+
     # ---------- 行为 ----------
     def seen_ids(self) -> set[int]:
         return {int(i) for i in self.data.get("seen", [])}
@@ -132,10 +160,12 @@ class State:
     def reset(self) -> None:
         path = self.path
         token = self.token
+        subscribers = self.subscriber_ids()
         self.data = {
             "baseline_done": False, "seen": [], "pending": [], "token": token,
             "token_updated_at": self.data.get("token_updated_at", 0),
             "last_check_at": 0, "last_check_iso": "", "started_notified": False,
+            "subscribers": subscribers,
             "stats": {"runs": 0, "pushed": 0, "errors": 0},
         }
         self.save()

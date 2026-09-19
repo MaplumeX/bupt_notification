@@ -62,7 +62,7 @@ class Config:
 
     # Telegram
     bot_token: str = ""
-    chat_id: str = ""
+    chat_id: str = ""                # 管理员 chat_id（可选）：控制型命令仅对其生效；推送目标由订阅者动态决定
 
     # 轮询
     interval_minutes: int = 30
@@ -86,8 +86,8 @@ class Config:
 
     @property
     def push_ready(self) -> bool:
-        """Telegram 是否已配置好。"""
-        return bool(self.bot_token and self.chat_id)
+        """Telegram 是否已配置好（有 bot token 即可推送，订阅者由 /start 动态注册）。"""
+        return bool(self.bot_token)
 
 
 def load_config(env_file: Path | None = None) -> Config:

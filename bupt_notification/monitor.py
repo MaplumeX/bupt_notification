@@ -41,6 +41,10 @@ class Monitor:
         self.cfg = cfg
         self.state = state or State(cfg.state_file)
         self.dry_run = dry_run
+        # 管理员（TELEGRAM_CHAT_ID）自动成为首个订阅者，兼容旧部署
+        if cfg.chat_id and not self.dry_run:
+            if self.state.add_subscriber(cfg.chat_id):
+                self.state.save()
         self.client = DektClient(
             cfg.api_base,
             self.state.token or cfg.token,
@@ -112,21 +116,57 @@ class Monitor:
 
     # ---------- 推送 ----------
     def _send(self, text: str) -> None:
+        """广播给所有订阅者。零订阅者或 dry_run 时只记日志。"""
         if self.dry_run:
             log.info("[dry-run] 本应推送：\n%s", text)
             return
-        send_message(self.cfg.bot_token, self.cfg.chat_id, text, timeout=self.cfg.timeout_seconds)
+        self.broadcast(text)
+
+    def broadcast(self, text: str) -> int:
+        """把一条文本发给所有订阅者，返回成功送达的会话数。
+
+        尽力而为语义：单个订阅者被拉黑（403）则移除；其他失败只记日志不重试。
+        网络完全不可用（零送达）时抛 TelegramError，由调用方决定重试。
+        """
+        targets = self.state.subscriber_ids()
+        if not targets:
+            log.info("暂无订阅者，跳过推送")
+            return 0
+        sent = 0
+        last_err: TelegramError | None = None
+        for chat_id in targets:
+            try:
+                send_message(self.cfg.bot_token, chat_id, text, timeout=self.cfg.timeout_seconds)
+                sent += 1
+            except TelegramError as exc:
+                if exc.blocked:
+                    log.info("订阅者 %s 已拉黑/移除机器人，自动退订", chat_id)
+                    self.state.remove_subscriber(chat_id)
+                    self.state.save()
+                else:
+                    log.warning("推送给 %s 失败：%s", chat_id, exc)
+                    last_err = exc
+            time.sleep(0.05)  # 全局约 30 msg/s 限制，稍作节流
+        if sent == 0 and last_err is not None:
+            raise last_err
+        return sent
 
     def flush_pending(self) -> int:
-        """把待发队列发出去。返回成功推送条数。失败则保留队列，下轮重试。"""
+        """把待发队列广播出去。返回成功广播的通知条数。
+
+        一条通知只要送达至少一个订阅者即记账；零订阅者或全部失败则保留队列，下轮重试。
+        """
         pend = list(self.state.pending)
         if not pend:
             return 0
         if self.state.paused:
             log.info("已暂停推送：%d 条通知留在待发队列，/resume 后补发", len(pend))
             return 0
-        if not self.cfg.push_ready and not self.dry_run:
-            log.info("Telegram 未配置（缺 TELEGRAM_BOT_TOKEN/CHAT_ID），%d 条通知留在待发队列", len(pend))
+        if not self.cfg.bot_token and not self.dry_run:
+            log.info("Telegram 未配置（缺 TELEGRAM_BOT_TOKEN），%d 条通知留在待发队列", len(pend))
+            return 0
+        if not self.dry_run and not self.state.subscriber_ids():
+            log.info("暂无订阅者：%d 条通知留在待发队列，有人 /start 后自动补推", len(pend))
             return 0
 
         sent = 0
@@ -134,17 +174,21 @@ class Monitor:
         if len(pend) > 1:
             try:
                 self._send(format_summary(len(pend)))
-            except (TelegramError, Exception) as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 log.warning("补推提示发送失败：%s", exc)
 
         for item in pend:
             text = format_notice(item, include_content=self.cfg.include_content)
             try:
-                self._send(text)
+                delivered = self._send(text)
             except TelegramError as exc:
                 log.error("推送失败，保留在队列稍后重试：%s", exc)
                 self.state.bump("errors")
                 self.state.save()
+                return sent
+            if delivered == 0 and not self.dry_run:
+                # 零送达（如网络故障），保留待下轮重试
+                log.warning("本轮零送达，%d 条通知留在队列稍后重试", len(pend) - sent)
                 return sent
             self.state.drop_pending(item["id"])
             self.state.mark_pushed([item["id"]])
@@ -175,7 +219,7 @@ class Monitor:
             self.state.data["baseline_done"] = True
             result["baseline"] = True
             log.info("建立基线：记录 %d 条现有通知，不推送", len(items))
-            if self.cfg.push_ready or self.dry_run:
+            if (self.cfg.bot_token or self.dry_run):
                 if self.cfg.notify_on_start and not self.state.data.get("started_notified"):
                     try:
                         self._send(format_start(len(items), self.cfg.interval_minutes))
@@ -219,12 +263,13 @@ class Monitor:
                     "既没有可用 token，也没有 BUPT_USERNAME / BUPT_PASSWORD —— "
                     "无法登录，监控会一直拿不到数据。请在 .env 里配置账号密码。"
                 )
-        if not self.cfg.push_ready:
+        if not self.cfg.bot_token:
             log.warning(
-                "未配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID："
-                "通知会进入待发队列（最多 %d 条）不会丢，配好后自动补推",
+                "未配置 TELEGRAM_BOT_TOKEN：通知会进入待发队列（最多 %d 条）不会丢，配好后自动补推",
                 self.cfg.max_pending,
             )
+        elif not self.state.subscriber_ids() and not self.cfg.chat_id:
+            log.warning("暂无订阅者：用户在 Telegram 里发 /start 即可订阅，订阅前通知排队不丢")
         left = token_seconds_left(self.client.token)
         if left is not None:
             log.info("当前 token 剩余有效期：%.1f 小时", left / 3600)
