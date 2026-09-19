@@ -115,12 +115,12 @@ class Monitor:
             return self.client.search_notifications(size=self.cfg.page_size)
 
     # ---------- 推送 ----------
-    def _send(self, text: str) -> None:
-        """广播给所有订阅者。零订阅者或 dry_run 时只记日志。"""
+    def _send(self, text: str) -> int:
+        """广播给所有订阅者，返回成功送达的会话数；dry_run 时只记日志并返回 1。"""
         if self.dry_run:
             log.info("[dry-run] 本应推送：\n%s", text)
-            return
-        self.broadcast(text)
+            return 1
+        return self.broadcast(text)
 
     def broadcast(self, text: str) -> int:
         """把一条文本发给所有订阅者，返回成功送达的会话数。
@@ -186,8 +186,8 @@ class Monitor:
                 self.state.bump("errors")
                 self.state.save()
                 return sent
-            if delivered == 0 and not self.dry_run:
-                # 零送达（如网络故障），保留待下轮重试
+            if not delivered and not self.dry_run:
+                # 零送达（如订阅者刚被拉黑并移除），保留待下轮重试
                 log.warning("本轮零送达，%d 条通知留在队列稍后重试", len(pend) - sent)
                 return sent
             self.state.drop_pending(item["id"])

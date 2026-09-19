@@ -143,6 +143,19 @@ python -m bupt_notification run   # 常驻运行
 | `CHROME_PATH` | 自动探测 | 手动指定 Chromium/Chrome 可执行文件 |
 | `LOG_FILE` | 无 | 额外写日志文件；容器下看 stdout 即可 |
 
+## 开发与测试
+
+```bash
+# 单元测试：只用标准库，不需要装 playwright、不联网
+python3 -m unittest discover -s tests -v
+
+# 容器内跑（验证镜像里的代码）
+docker compose exec -T bupt-notification python -m unittest discover -s tests -v
+```
+
+CI（`.github/workflows/docker.yml`）会先跑这个测试，通过后才构建镜像并推到 GHCR
+（`ghcr.io/<owner>/bupt_notification`，main 分支 → `latest`，打 `v*` tag → 语义化版本 + `sha-*`）。
+
 ## 数据与状态
 
 `data/` 目录（挂载到容器 `/app/data`）保存：
