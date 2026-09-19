@@ -5,7 +5,7 @@ SERVICE := bupt-notification
 COMPOSE := docker compose
 RUN := $(COMPOSE) exec -T $(SERVICE) python -m bupt_notification
 
-.PHONY: help build up down restart ps logs health once list status preview login test-notify detect-chat-id reset shell
+.PHONY: help build up down restart ps logs health once list status preview login test-notify detect-chat-id reset prune shell
 
 help:  ## 显示所有命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -54,6 +54,9 @@ detect-chat-id:  ## 自动检测 Telegram chat_id
 
 reset:  ## 重置状态（下次重新建基线）
 	$(RUN) reset
+
+prune:  ## 丢弃待发队列里不属于 NOTIFY_CHANNELS 的条目
+	$(RUN) prune
 
 shell:  ## 进容器
 	$(COMPOSE) exec $(SERVICE) bash

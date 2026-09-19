@@ -171,6 +171,25 @@ def cmd_reset(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune(cfg: Config, args: argparse.Namespace) -> int:
+    """丢掉待发队列里不属于 NOTIFY_CHANNELS 的条目。"""
+    mon = Monitor(cfg, State(cfg.state_file), dry_run=True)
+    before = len(mon.state.pending)
+    if args.dry_run:
+        from .dekt import filter_channels
+
+        kept = len(filter_channels(mon.state.pending, cfg.notify_channels))
+        dropped = before - kept
+        mon.state.data["pending"] = list(mon.state.pending)  # 不改动
+    else:
+        dropped = mon.prune_pending()
+        kept = len(mon.state.pending)
+    chans = "、".join(cfg.notify_channels) or "（不过滤）"
+    verb = "将丢弃" if args.dry_run else "已丢弃"
+    print(f"待发队列：{before} → {kept} 条（{verb} {dropped} 条不属于 {chans} 的条目）")
+    return 0
+
+
 def cmd_preview_format(cfg: Config, args: argparse.Namespace) -> int:
     """把推送内容直接打印出来，用来检查排版，不需要 Telegram。"""
     token = State(cfg.state_file).token or cfg.token
@@ -221,6 +240,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("reset", help="重置状态（重新建立基线）")
     sub.add_parser("healthcheck", help="docker healthcheck：检查轮询是否按期执行")
 
+    sp = sub.add_parser("prune", help="丢弃待发队列里不属于 NOTIFY_CHANNELS 的条目")
+    sp.add_argument("--dry-run", action="store_true", help="只统计不修改")
+
     sp = sub.add_parser("preview", help="打印推送排版预览（不发送）")
     sp.add_argument("-n", "--limit", type=int, default=3)
     return p
@@ -236,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run, "once": cmd_once, "list": cmd_list, "login": cmd_login,
         "detect-chat-id": cmd_detect_chat_id, "test-notify": cmd_test_notify,
         "status": cmd_status, "reset": cmd_reset, "preview": cmd_preview_format,
-        "healthcheck": cmd_healthcheck,
+        "healthcheck": cmd_healthcheck, "prune": cmd_prune,
     }
     handler = handlers[cmd]
     try:

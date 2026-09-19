@@ -20,9 +20,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, Sequence
 
 log = logging.getLogger("bupt.dekt")
+
+# 接口不是真过滤，取多少原始条目：按需要的通知条数放大若干倍再截断
+RAW_FETCH_FACTOR = 4
+RAW_FETCH_MAX = 300
 
 
 class AuthError(RuntimeError):
@@ -82,17 +86,39 @@ def _iso_to_local(iso: str) -> str:
 def normalize(hit: dict[str, Any], api_base: str) -> dict[str, Any]:
     """把接口返回的单条通知整理成内部结构。"""
     news_id = int(hit.get("id"))
+    section = hit.get("section") or []
     return {
         "id": news_id,
         "title": (hit.get("title") or "").strip(),
         "author": (hit.get("author") or "").strip(),
         "time": hit.get("time") or "",
         "time_local": _iso_to_local(hit.get("time") or ""),
-        "section": hit.get("section") or [],
+        # 频道：/api/v1/news/search 的 type 参数并不是真过滤，返回的是混合流，
+        # 真正的频道在每条记录的 type 字段（其次 section[0]）里。
+        "channel": (hit.get("type") or (section[0] if section else "") or "").strip(),
+        "section": section,
         "content": (hit.get("content") or "").strip(),
         "url": f"{api_base}/news/{news_id}",
         "source_url": hit.get("link") or "",
     }
+
+
+def item_channel(item: dict) -> str:
+    """取条目频道：优先 channel 字段，其次 section[0]（兼容旧数据）。"""
+    chan = item.get("channel")
+    if chan:
+        return str(chan).strip()
+    section = item.get("section") or []
+    return str(section[0]).strip() if section else ""
+
+
+def filter_channels(items: list[dict], channels: Sequence[str]) -> list[dict]:
+    """只保留指定频道的条目；channels 为空表示不过滤。"""
+    wanted = {c.strip() for c in channels if c and c.strip()}
+    if not wanted:
+        return list(items)
+    return [it for it in items if item_channel(it) in wanted]
+
 
 
 class DektClient:
@@ -158,14 +184,20 @@ class DektClient:
         return payload
 
     # ---------- 业务 ----------
-    def search_notifications(self, size: int = 50, offset: int = 0) -> list[dict]:
-        """按发布时间倒序返回通知列表。"""
+    def search_notifications(self, size: int = 50, offset: int = 0,
+                             channels: Sequence[str] = ()) -> list[dict]:
+        """按发布时间倒序返回通知列表。
+
+        注意：接口的 type=notification 不是真过滤，返回的是「通知+新闻+公告+讲座」
+        的混合流，所以要多取一些原始条目再按频道过滤，避免被新闻挤掉通知。
+        """
+        raw_size = min(RAW_FETCH_MAX, max(size * RAW_FETCH_FACTOR, size))
         payload = self._request(
             "POST",
             "/api/v1/news/search",
             json_body={
                 "type": "notification",
-                "size": int(size),
+                "size": int(raw_size),
                 "offset": int(offset),
                 "show_details": False,
             },
@@ -174,7 +206,8 @@ class DektClient:
         if isinstance(data, str):  # 接口偶尔把 data 序列化成字符串
             data = json.loads(data)
         hits = data.get("hits") or []
-        return [normalize(h, self.api_base) for h in hits if h.get("id")]
+        items = [normalize(h, self.api_base) for h in hits if h.get("id")]
+        return filter_channels(items, channels)[:size]
 
     def notification_total(self) -> int:
         payload = self._request(

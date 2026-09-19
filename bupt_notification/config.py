@@ -52,6 +52,21 @@ def _get_bool(env: dict[str, str], key: str, default: bool) -> bool:
     return raw.lower() in _TRUE
 
 
+def _get_channels(env: dict[str, str], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """解析频道白名单：NOTIFY_CHANNELS=校内通知,学术讲座
+
+    - 键不存在 → 用默认值
+    - 键存在但为空 → 空元组（表示不过滤，全都要）
+    """
+    if key not in os.environ and key not in env:
+        return default
+    raw = _get(env, key, "")
+    if not raw:
+        return ()
+    parts = [p.strip() for p in raw.replace("，", ",").replace("、", ",").replace(" ", ",").split(",")]
+    return tuple(p for p in parts if p)
+
+
 @dataclass
 class Config:
     # 站点
@@ -68,6 +83,7 @@ class Config:
     interval_minutes: int = 30
     refresh_margin_hours: int = 6  # token 剩余不足该值时提前续期（token 寿命 3 天）
     page_size: int = 50             # 每次拉取的最新通知条数
+    notify_channels: tuple[str, ...] = ("校内通知",)  # 只要这些频道（接口返回的是混合流）
     include_content: bool = False   # 推送时是否附正文全文
     notify_on_start: bool = True    # 首次成功推送时告知"监控已启用"
     max_pending: int = 100          # 待发队列上限，超出的最旧条目丢弃
@@ -102,6 +118,7 @@ def load_config(env_file: Path | None = None) -> Config:
         interval_minutes=_get_int(env, "POLL_INTERVAL_MINUTES", 30),
         refresh_margin_hours=_get_int(env, "TOKEN_REFRESH_MARGIN_HOURS", 6),
         page_size=_get_int(env, "PAGE_SIZE", 50),
+        notify_channels=_get_channels(env, "NOTIFY_CHANNELS", ("校内通知",)),
         include_content=_get_bool(env, "INCLUDE_CONTENT", False),
         notify_on_start=_get_bool(env, "NOTIFY_ON_START", True),
         max_pending=_get_int(env, "MAX_PENDING", 100),

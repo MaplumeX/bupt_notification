@@ -120,6 +120,7 @@ python -m bupt_notification run   # 常驻运行
 | `status` | 查看当前状态与统计 |
 | `preview -n 3` | 本地打印推送排版预览，不需要 Telegram |
 | `reset` | 重置状态，下次运行重新建基线 |
+| `prune` | 丢弃待发队列里不属于 `NOTIFY_CHANNELS` 的条目（收紧过滤后清理历史队列用，`--dry-run` 只统计） |
 | `healthcheck` | 供 docker healthcheck 使用：超过 2 个周期未检查则报不健康 |
 
 ## 配置项
@@ -134,6 +135,7 @@ python -m bupt_notification run   # 常驻运行
 | `TELEGRAM_CHAT_ID` | 空 | 管理员 chat_id，启用控制型命令；订阅者动态注册无需配置 |
 | `POLL_INTERVAL_MINUTES` | `30` | 检查周期（分钟） |
 | `TOKEN_REFRESH_MARGIN_HOURS` | `6` | token 剩余不足该小时数时提前续期 |
+| `NOTIFY_CHANNELS` | `校内通知` | 只推送这些频道（逗号分隔）。⚠️ 接口 `type=notification` 不是真过滤，返回的是「校内通知/校内新闻/全部公示公告/学术讲座」混合流，靠这个白名单筛；留空表示不过滤 |
 | `PAGE_SIZE` | `50` | 每次拉取的通知条数 |
 | `INCLUDE_CONTENT` | `false` | 推送是否附带正文全文 |
 | `NOTIFY_ON_START` | `true` | 首次成功推送时发送「监控已启用」提示 |

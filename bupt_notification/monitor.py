@@ -108,11 +108,13 @@ class Monitor:
         """拉取通知；token 中途失效则重登一次再试。"""
         self.ensure_auth()
         try:
-            return self.client.search_notifications(size=self.cfg.page_size)
+            return self.client.search_notifications(size=self.cfg.page_size,
+                                                    channels=self.cfg.notify_channels)
         except AuthError as exc:
             log.warning("token 被服务端拒绝（%s），重新登录后重试", exc)
             self._relogin()
-            return self.client.search_notifications(size=self.cfg.page_size)
+            return self.client.search_notifications(size=self.cfg.page_size,
+                                                    channels=self.cfg.notify_channels)
 
     # ---------- 推送 ----------
     def _send(self, text: str) -> int:
@@ -250,6 +252,24 @@ class Monitor:
         )
         return result
 
+    def prune_pending(self, *, persist: bool = True) -> int:
+        """丢掉待发队列里不属于 notify_channels 的条目（返回丢弃条数）。
+
+        用于配置收紧后清理历史队列（例如从「混合流」改成只要校内通知）。
+        """
+        from .dekt import filter_channels
+
+        pend = list(self.state.pending)
+        if not pend:
+            return 0
+        keep = filter_channels(pend, self.cfg.notify_channels)
+        dropped = len(pend) - len(keep)
+        if dropped:
+            self.state.data["pending"] = keep
+            if persist:
+                self.state.save()
+        return dropped
+
     def _startup_checks(self) -> None:
         """启动自检：把「配置缺了什么」一次说清楚，别等到 401 才发现。"""
         if not (self.cfg.username and self.cfg.password):
@@ -273,6 +293,10 @@ class Monitor:
         left = token_seconds_left(self.client.token)
         if left is not None:
             log.info("当前 token 剩余有效期：%.1f 小时", left / 3600)
+        if self.cfg.notify_channels:
+            log.info("只推送这些频道：%s", "、".join(self.cfg.notify_channels))
+        else:
+            log.info("NOTIFY_CHANNELS 为空：不按频道过滤（接口返回的是混合流）")
 
     def run_once_locked(self, *, force_baseline: bool = False) -> dict:
         """带单实例锁跑一轮。供主循环和 Telegram /pull 命令共用。"""
@@ -322,4 +346,4 @@ class Monitor:
 def fetch_latest(cfg: Config, limit: int = 10, *, token: str = "") -> list[dict]:
     """只读拉取（不碰状态文件），用于 --list。"""
     client = DektClient(cfg.api_base, token or cfg.token, timeout=cfg.timeout_seconds, user_agent=cfg.user_agent)
-    return client.search_notifications(size=limit)
+    return client.search_notifications(size=limit, channels=cfg.notify_channels)
