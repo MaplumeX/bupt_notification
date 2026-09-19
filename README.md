@@ -1,221 +1,164 @@
 # bupt_notification
 
-北邮「第二课堂」**校内通知监控** → **Telegram 机器人推送**。
-每 30 分钟检查一次，发现新通知立刻推送到你的 Telegram。**Docker Compose 部署。**
+北邮第二课堂（dekt.bupt.edu.cn）校内通知监控，发现新通知自动推送到 Telegram。
 
-## 它是怎么工作的
+配好账号后即可常驻运行：程序定期抓取通知列表，和已推送记录比对，一旦出现新通知就立即推送到你的 Telegram。支持通过 Bot 命令远程控制，适合部署在服务器或 NAS 上长期挂着。
 
-```
-                        ┌────────────────────────────────────────┐
-                        │  dekt.bupt.edu.cn（第二课堂）            │
-                        │  POST /api/v1/news/search               │
-                        │  body: {"type":"notification", ...}     │
-                        └───────────────┬────────────────────────┘
-                                        │ HTTP + Authorization: Bearer <token>
-                                        ▼
- ┌──────────────────────────────────────────────────────────────────────┐
- │ docker 容器 bupt-notification（playwright 官方镜像 + 本项目代码）        │
- │                                                                      │
- │  ┌──────────────┐   ┌────────────────┐   ┌──────────────────┐        │
- │  │ 每 30 分钟轮询 │──▶│ 与 state.json   │──▶│ 新条目进待发队列    │        │
- │  │ monitor.py   │   │ 去重 / 建基线    │   │ pending[]        │        │
- │  └──────────────┘   └────────────────┘   └────────┬─────────┘        │
- │         ▲ token 失效时自动重登                      │ 逐条发送           │
- │         └── 无头 Chromium（镜像自带）               ▼                  │
- │                                    ┌────────────────────────┐        │
- │                                    │ Telegram Bot API        │        │
- │                                    └────────────────────────┘        │
- └──────────────────────────────┬───────────────────────────────────────┘
-                                │ 挂载卷
-                       ┌────────▼────────┐
-                       │ ./data          │  state.json（基线/已推/待发/token）
-                       │                 │  browser_state.json（会话）
-                       └─────────────────┘
-```
+## 功能特性
 
-实测得到的两条关键结论：
+- **自动登录与续期**：登录接口需要 JS 生成的验证码，纯 HTTP 走不通，因此用 Playwright 驱动无头浏览器完成登录；拿到的 token（JWT，寿命约 3 天）存入状态文件，之后所有请求走轻量的纯 HTTP。token 剩余不足设定阈值时自动提前续期，中途失效也有 401 兜底重登。
+- **不打扰式启动**：首次运行只建立基线（记录现有通知），不推送任何历史消息；之后只推真正的新通知。
+- **消息不丢失**：推送失败、暂停期间、或 Telegram 尚未配置时，新通知进入待发队列（上限可配），恢复后自动补发。
+- **Telegram 命令机器人**：不出服务器也能远程查看状态、立即拉取、暂停/恢复推送。
+- **单实例保护**：基于 `flock` 的锁，常驻进程与手动执行不会撞车。
+- **零重依赖**：抓取与推送只用 Python 标准库；`playwright` 仅在登录环节使用。
+- **开箱即用的容器化**：基于 Playwright 官方镜像（自带 Chromium 与系统依赖），带健康检查与日志轮转配置。
 
-1. **抓取完全不需要浏览器。** 接口用 `Authorization: Bearer <token>` 认证，token 就是浏览器
-   `localStorage['secondclass.tokenv3']` 里那串；纯 HTTP（热路径只用 Python 标准库）即可稳定抓取。
-2. **只有登录/换 token 需要浏览器。** `POST /api/v1/auth/sessions` 要求 JS 生成的验证码字段，
-   纯 HTTP 提交会返回 420「验证码错误」。所以 token 失效时才启动一次容器内的无头 Chromium
-   重新登录（约 15 秒），拿到新 token 后继续走 HTTP。
+## 快速开始（Docker，推荐）
 
-## 目录结构
+前置要求：已安装 Docker 与 docker compose。
 
-```
-bupt_notification/
-├── bupt_notification/          # 应用代码（纯标准库跑热路径）
-│   ├── config.py               # .env / 环境变量配置
-│   ├── dekt.py                 # 第二课堂 API 客户端
-│   ├── web_login.py            # 浏览器登录（仅换 token，playwright）
-│   ├── state.py                # 基线 / 已推送 / 待发队列（原子写 JSON）
-│   ├── telegram.py             # Bot API 推送 + 命令轮询 + 消息排版
-│   ├── bot.py                 # Telegram 命令处理（/status /pause /pull /latest…）
-│   ├── monitor.py              # 轮询主循环
-│   └── cli.py                  # 命令行
-├── Dockerfile                  # 基于 mcr.microsoft.com/playwright/python（自带 Chromium）
-├── docker-compose.yml          # 服务定义 + 健康检查 + 日志上限
-├── Makefile                    # 常用命令快捷方式
-├── .env                        # 账号 + bot token（600 权限，已被 .dockerignore 排除）
-├── data/                       # 挂载卷：运行状态（含 token，600 权限）
-└── README.md
-```
-
-## 快速开始
+### 1. 准备配置
 
 ```bash
-cd /root/bupt_notification
-
-# 1) 从模板生成本机配置并填写（账号密码、bot token、chat_id）
-cp .env.example .env && vi .env
-
-# 2) 构建并启动
-docker compose up -d --build
-
-# 3) 看一眼日志
-docker compose logs -f
+cp .env.example .env
 ```
 
-首次运行会**记录基线、不推送历史通知**；之后只推新增。
-
-## 配置（.env）
-
-**没有任何凭据写在代码里。** 一切通过 `.env`（本机）/ 环境变量注入：
-
-```bash
-cp .env.example .env    # 模板在 .env.example，只有占位符
-vi .env                 # 填你自己的账号、bot token、chat_id
-```
+编辑 `.env`，至少填写：
 
 ```ini
-BUPT_USERNAME=你的学工号           # 用于登录 / token 到期自动续期
+# 北邮第二课堂账号（用于首次登录及 token 过期后自动续期）
+BUPT_USERNAME=你的学号
 BUPT_PASSWORD=你的密码
-TELEGRAM_BOT_TOKEN=你的bot token
-TELEGRAM_CHAT_ID=你的chat id
 
-POLL_INTERVAL_MINUTES=30          # 检查频率
-TOKEN_REFRESH_MARGIN_HOURS=6      # token 剩余不足 N 小时就提前续期
-INCLUDE_CONTENT=false             # true = 推送时附正文全文
-MAX_PENDING=100                   # 待发队列上限
+# Telegram 推送
+TELEGRAM_BOT_TOKEN=xxx      # 从 @BotFather 获取
+TELEGRAM_CHAT_ID=xxx        # 见下方第 3 步
 ```
 
-- `.env` 在 `.gitignore` 和 `.dockerignore` 里，**既不会进 git，也不会进镜像层**
-- 运行期 token 存在 `./data/state.json`（600 权限，同样不入库），日志只打印账号和剩余有效期，**从不打印 token**
-- 改完 `.env`：`docker compose restart`
-
-### 创建机器人并拿到 chat_id
-
-1. Telegram 找 **@BotFather** → `/newbot` → 得到 `123456789:AAE...`，填进 `.env`
-2. 给新机器人发一条 `/start`
-3. 自动检测 chat_id：
+### 2. 启动容器
 
 ```bash
-make detect-chat-id          # 或 docker compose exec -T bupt-notification \
-                             #    python -m bupt_notification detect-chat-id
+docker compose up -d        # 首次会构建镜像；也可先 docker compose pull 用预构建镜像
 ```
-把输出的 `TELEGRAM_CHAT_ID=...` 填进 `.env`，然后：
+
+### 3. 获取 chat_id
+
+先在 Telegram 里给你的机器人发一条 `/start`，然后：
 
 ```bash
-make test-notify && docker compose restart
+docker compose exec -T bupt-notification python -m bupt_notification detect-chat-id
 ```
 
-## 机器人命令（Telegram 里直接发）
+把输出的 chat_id 填回 `.env`，再 `docker compose restart`。
 
-监控常驻运行时，在等待下一轮检查的间隙会长轮询 Telegram 命令（只响应 `.env` 里配置的那个 chat_id）：
+### 4. 验证
+
+```bash
+docker compose logs -f                          # 观察日志：首轮建立基线，之后按周期检查
+docker compose exec -T bupt-notification \
+  python -m bupt_notification test-notify       # 给 Telegram 发一条测试消息
+```
+
+收到测试消息即部署成功。也可以直接在 Telegram 里发 `/status` 查看。
+
+## 本地运行（不用 Docker）
+
+```bash
+pip install -r requirements.txt   # 仅需 playwright
+cp .env.example .env              # 填写配置，同上
+python -m bupt_notification run   # 常驻运行
+```
+
+> 本地跑需要能找到 Chromium/Chrome（会自动探测常见路径，也可用 `CHROME_PATH` 指定）。
+
+## 工作原理
+
+```
+┌─────────────┐   浏览器登录(仅首次/续期)   ┌──────────────┐
+│  Playwright  │ ─────────────────────────▶ │ dekt.bupt.edu.cn │
+└─────────────┘        获取 JWT token       └──────┬───────┘
+       │                                          │ 纯 HTTP 拉取通知
+       │ token 存入 state.json                    ▼
+       │                                   去重比对（已推送/已入队）
+       ▼                                          │
+  提前续期（剩余 < 阈值）                          ▼
+                                          新通知 → 待发队列 → Telegram
+```
+
+每轮检查的流程：拉取最新通知 → 与「已推送集合 + 待发队列」比对找出新增 → 入队 → 逐条推送并记账。任何环节失败都不会中断下一轮，错误会计入统计。
+
+## Telegram 命令
+
+常驻运行时，机器人会注册并响应以下命令（仅对 `TELEGRAM_CHAT_ID` 对应的会话生效）：
 
 | 命令 | 说明 |
 | --- | --- |
-| `/status` | 查看监控状态（暂停/运行、token 有效期、队列、统计等） |
-| `/pause` | 暂停推送：通知照常抓取并进入待发队列，不会丢 |
-| `/resume` | 恢复推送，并立即补发队列里的通知 |
-| `/pull` | 不等下一个周期，立即拉取检查一轮（可代替等定时） |
-| `/latest` | 列出最新 10 条通知（可带参数 `/latest 20`，上限 30 条） |
+| `/status` | 查看监控状态：运行/暂停、token 有效期、队列、统计等 |
+| `/pause` | 暂停推送（新通知照常入队，不丢） |
+| `/resume` | 恢复推送并补发队列中的通知 |
+| `/pull` | 立即执行一轮检查 |
+| `/latest [n]` | 列出最新 n 条通知（默认 10，最多 30） |
 | `/help` | 查看全部命令 |
 
-## 常用命令（Makefile）
+## CLI 子命令
 
-```bash
-make help          # 列出全部命令
-make up            # 构建 + 后台启动
-make logs          # 跟踪日志
-make ps            # 容器状态（含健康状态）
-make health        # 健康检查结果
-make once          # 只跑一轮（首次 = 建基线）
-make list          # 看最新 10 条通知（只读）
-make preview       # 看推送排版
-make status        # 当前状态（基线/队列/token 年龄）
-make login         # 浏览器登录刷新 token
-make test-notify   # 发一条 Telegram 测试消息
-make reset         # 重置状态（下次重新建基线）
-make shell         # 进容器
-make restart       # 改完 .env 后重启
-```
+`python -m bupt_notification <子命令>`（Docker 下用 `make <目标>`，见 Makefile）：
 
-不用 Makefile 也可以，等价写法：
+| 子命令 | 说明 |
+| --- | --- |
+| `run` | 常驻运行（默认）。`--dry-run` 只打印将要推送的内容 |
+| `once` | 只跑一轮。`--baseline` 强制重建基线 |
+| `list -n 10` | 只读列出最新通知，不改状态 |
+| `login` | 强制浏览器登录刷新 token（`--headed` 显示浏览器窗口） |
+| `detect-chat-id` | 从 getUpdates 自动检测 chat_id |
+| `test-notify` | 发送一条测试消息验证推送链路 |
+| `status` | 查看当前状态与统计 |
+| `preview -n 3` | 本地打印推送排版预览，不需要 Telegram |
+| `reset` | 重置状态，下次运行重新建基线 |
+| `healthcheck` | 供 docker healthcheck 使用：超过 2 个周期未检查则报不健康 |
 
-```bash
-docker compose exec -T bupt-notification python -m bupt_notification status
-docker compose run --rm bupt-notification python -m bupt_notification list -n 10
-```
+## 配置项
 
-## 运维要点
+全部通过 `.env`（或环境变量，环境变量优先）配置，完整示例见 `.env.example`：
 
-- **数据在 `./data` 卷里**：`state.json`（已推 id、待发队列、token）、`browser_state.json`。
-  容器重建/升级都不会丢。备份：`tar czf backup.tgz data/`。
-- **健康检查**：容器内每 5 分钟跑一次 `healthcheck` 子命令，若超过 2 个轮询周期没成功检查则
-  标记 unhealthy（`docker compose ps` 可见）。
-- **日志**：`docker compose logs`；已限制 json-file 单文件 10MB × 3。
-- **重启策略**：`unless-stopped`，宿主重启后自动拉起。
-- **改代码后**：`docker compose up -d --build`。
-- **镜像体积**：playwright 官方镜像自带 Chromium + 系统依赖（约 2GB），换来的是
-  换 token 时的浏览器登录开箱可用，不用自己装 Chrome 和一堆 .so。
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `BUPT_USERNAME` / `BUPT_PASSWORD` | 空 | 第二课堂账号；不填则必须有可用 token 且无法自动续期 |
+| `BUPT_TOKEN` | 空 | 手动预置 token（一般留空，通常从浏览器 localStorage `secondclass.tokenv3` 获取） |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 空 | Telegram 推送配置 |
+| `POLL_INTERVAL_MINUTES` | `30` | 检查周期（分钟） |
+| `TOKEN_REFRESH_MARGIN_HOURS` | `6` | token 剩余不足该小时数时提前续期 |
+| `PAGE_SIZE` | `50` | 每次拉取的通知条数 |
+| `INCLUDE_CONTENT` | `false` | 推送是否附带正文全文 |
+| `NOTIFY_ON_START` | `true` | 首次成功推送时发送「监控已启用」提示 |
+| `MAX_PENDING` | `100` | 待发队列上限，超出丢弃最旧条目 |
+| `HTTP_TIMEOUT_SECONDS` | `25` | HTTP 请求超时 |
+| `STATE_FILE` | `./data/state.json` | 状态文件路径（compose 中注入 `/app/data/state.json`，挂载卷持久化） |
+| `CHROME_PATH` | 自动探测 | 手动指定 Chromium/Chrome 可执行文件 |
+| `LOG_FILE` | 无 | 额外写日志文件；容器下看 stdout 即可 |
 
-## 认证与 token 续期
+## 数据与状态
 
-登录/续期**全部自动**，不需要手工贴 token：
+`data/` 目录（挂载到容器 `/app/data`）保存：
 
-| 时机 | 行为 |
-|---|---|
-| 启动时没有 token | 用 `.env` 的账号密码跑一次容器内无头 Chromium 登录，token 存进 `data/state.json` |
-| 启动自检 | 打印当前 token 剩余有效期；缺账号密码/缺 bot 配置会明确告警（不会静默失败） |
-| 每轮轮询前 | 解析 JWT 的 `exp`，**剩余不足 `TOKEN_REFRESH_MARGIN_HOURS`（默认 6 小时）就提前续期** |
-| 接口返回 401/403 | 立即重登一次再重试本轮请求（兜底，防止 token 被服务端提前作废） |
-| 未配置账号密码时 | 有 token 仍可运行，但会告警"到期后无法自动续期"；没有 token 则明确报错 |
+- `state.json` — 已推送通知、待发队列、token、统计等全部状态，容器重建不丢失
+- `browser_state.json` — 浏览器登录上下文，加速后续自动登录
+- `monitor.lock` — 单实例锁文件
 
-> 实测：该 token 是 JWT，`exp - iat = 259200s`，**寿命正好 3 天**，所以提前续期是必需的，
-> 否则每 3 天就会出现一段抓不到数据的时间窗。
-> 想手动立刻换：`make login`（会重新登录并把新 token 写进 `data/state.json`）。
+删除 `state.json`（或执行 `reset`）后重新运行，会重新建立基线而不推送历史通知。
 
-## 行为说明（重要）
+## 常见问题
 
-- **首次运行只建立基线，不推送。** 现有通知会被记下来，之后只推*新增*的。
-- **待发队列不丢消息。** Telegram 没配好、网络抖动、token 失效时，抓到的通知留在 `pending`
-  队列，下一轮重试；补推超过 1 条会先发一条「本周期补推 N 条」说明。
-- **去重键是 `news_id`**，同一通知不会重复推；已推送 id 保留最近 2000 条。
-- **token 自动续期**：接口 401 时自动走一次容器内浏览器登录，无需人工干预；
-  手动换：`make login`。
-- **定时任务有锁**：`data/monitor.lock` 用 flock 防止手动执行与常驻轮询撞车
-  （撞车时 `make once` 会提示"已有另一个实例在运行"，等下一轮即可）。
-- 站点前置瑞数类 WAF；带 Bearer token 的普通 HTTP 请求不受影响（已实测）。
+**登录失败 / 一直拿不到 token？**
+确认账号密码正确；可本地 `python -m bupt_notification login --headed` 观察浏览器行为排查。如果学校侧验证策略变更，可能需要更新 `web_login.py` 的登录流程。
 
-## 排障
+**Telegram 一直收不到消息？**
+依次检查：`.env` 中 token/chat_id 是否填对 → `test-notify` 是否能收到 → `/status` 命令是否有响应 → 容器日志有无推送报错。未配置时通知会排队不丢。
 
-| 现象 | 处理 |
-|---|---|
-| `docker compose ps` 显示 unhealthy | `make logs` 看原因；多半是 token 失效后登录失败（密码改了/需要验证码） |
-| `登录失败：没拿到 token` | 用 `docker compose run --rm bupt-notification python -m bupt_notification login --headed` 看页面（需要 X11，一般直接看日志里的页面提示就够） |
-| `推送失败，保留在队列稍后重试：Unauthorized` | bot token 或 chat_id 不对，先 `make test-notify` |
-| 想重新把当前通知当基线 | `make reset` 然后 `make once` |
-| 想改频率 | `.env` 里改 `POLL_INTERVAL_MINUTES`，`make restart` |
-| 容器内时间不对 | compose 里已设 `TZ=Asia/Shanghai`；日志时间应为北京时间 |
-| 数据目录权限 | 容器以 root 运行，`data/` 归 root 即可；换非 root 需自行 `chown` |
+**token 过期了怎么办？**
+只要配置了账号密码，程序会在 token 临期前自动续期，无需干预。未配置账号密码的，补齐 `.env` 后重启即可。
 
-## 不用 Docker 也能跑（可选）
+## 许可
 
-代码热路径零第三方依赖，只有换 token 才需要 playwright：
-
-```bash
-python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
-./.venv/bin/python -m bupt_notification once
-```
+仅供个人学习与自用，请勿对本项目做压力测试或滥用学校接口。
