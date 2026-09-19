@@ -3,7 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: bupt-notification:latest
+    # 优先用 ghcr 镜像：docker compose pull && docker compose up -d
+    # 本地没拉到镜像时会自动回退到上面的 build
+    image: ghcr.io/maplumex/bupt_notification:latest
     container_name: bupt-notification
     restart: unless-stopped
     env_file:
