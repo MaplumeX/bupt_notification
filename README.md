@@ -1,3 +1,4 @@
+> 注：第二课堂渠道的通知相比信息门户略有延迟
 # bupt_notification
 
 北邮第二课堂（dekt.bupt.edu.cn）校内通知监控，发现新通知自动推送到 Telegram。
